@@ -3,12 +3,12 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Crossy Road 3D – Enhanced</title>
+  <title>Crossy Road 3D – Enhanced VR</title>
   <style>
     html, body { 
       margin:0; 
       height:100%; 
-      background: linear-gradient(135deg, #1a1a2e 0%, #0f0f1e 100%);
+      background: linear-gradient(135deg, #020617 0%, #020617 100%);
       overflow:hidden; 
       font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
     }
@@ -108,10 +108,10 @@
     }
     
     #card, #start-card { 
-      background: linear-gradient(135deg, #1f2937 0%, #111827 100%);
+      background: linear-gradient(135deg, #020617 0%, #020617 100%);
       padding: 32px; 
       border-radius: 24px; 
-      box-shadow: 0 20px 60px rgba(0,0,0,.7);
+      box-shadow: 0 20px 60px rgba(0,0,0,.9);
       max-width: 480px;
       border: 1px solid rgba(255,255,255,0.1);
       animation: slideUp 0.4s ease;
@@ -239,14 +239,17 @@
   <!-- Start Screen -->
   <div id="start-screen">
     <div id="start-card">
-      <h1>🎮 Crossy Road 3D</h1>
-      <p>Cruza la carretera esquivando obstáculos</p>
+      <h1>🎮 Crossy Road 3D VR</h1>
+      <p>Cruza la carretera esquivando obstáculos – ahora en VR (Meta Quest)</p>
       <div style="margin: 20px 0; text-align: left; opacity: 0.8;">
-        <p><strong>Controles:</strong></p>
+        <p><strong>Controles teclado (PC):</strong></p>
         <p>• W/↑ - Avanzar</p>
         <p>• A/← - Izquierda</p>
         <p>• S/↓ - Retroceder</p>
         <p>• D/→ - Derecha</p>
+        <p style="margin-top:12px;"><strong>Controles VR (Quest):</strong></p>
+        <p>• Joystick – mover por la cuadrícula</p>
+        <p>• Gira la cabeza – cámara en primera persona</p>
       </div>
       <button id="start-btn">¡Comenzar!</button>
     </div>
@@ -295,6 +298,7 @@
     </div>
   </div>
 
+  <!-- Three.js + loaders -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/fflate@0.7.4/umd/index.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
@@ -342,8 +346,34 @@
   // Loaded models
   let carModels = [];
   let loadedCount = 0;
-  const totalModels = 5; // 3 cars + 1 player + 1 HDR environment (animations are part of player loading)
-  
+  const totalModels = 7; // 3 cars + 1 player + HDR + 2 props
+
+  // ============ VR / AUDIO / NAVIGATION STATE ============
+  let vrRig = null;
+  let controller1 = null;
+  let controller2 = null;
+  let controllerGamepad1 = null;
+  let controllerGamepad2 = null;
+  let lastVRMoveTime = 0;
+  const VR_MOVE_COOLDOWN = 200; // ms entre movimientos de rejilla
+
+  // Audio
+  let audioListener = null;
+  let bgMusic = null;
+  let collisionSound = null;
+  let audioLoader = null;
+
+  // Límites de navegación (X/Z) según segmentos generados
+  const navBounds = {
+    minX: null,
+    maxX: null,
+    minZ: null,
+    maxZ: null
+  };
+
+  // Texturas terreno (solo TEXTURAS/)
+  const textureLoader = new THREE.TextureLoader();
+
   // ============ UI ELEMENTS ============
   const distUI = document.getElementById('dist');
   const livesUI = document.getElementById('lives');
@@ -364,43 +394,222 @@
   // ============ MATERIALS (global) ============
   let materials = {};
 
+  // ============ MINIMAL VR BUTTON (WebXR entry) ============
+  const VRButton = {
+    createButton: function (renderer) {
+      const button = document.createElement('button');
+      button.style.position = 'absolute';
+      button.style.bottom = '20px';
+      button.style.right = '20px';
+      button.style.padding = '12px 18px';
+      button.style.borderRadius = '999px';
+      button.style.border = 'none';
+      button.style.fontSize = '14px';
+      button.style.fontWeight = '600';
+      button.style.cursor = 'pointer';
+      button.style.background = '#22c55e';
+      button.style.color = '#020617';
+      button.style.boxShadow = '0 0 18px rgba(0,0,0,0.45)';
+      button.textContent = 'Enter VR';
+
+      function showUnsupported() {
+        button.textContent = 'VR no disponible';
+        button.disabled = true;
+        button.style.background = '#4b5563';
+      }
+
+      if ('xr' in navigator) {
+        navigator.xr.isSessionSupported('immersive-vr').then((supported) => {
+          if (!supported) {
+            showUnsupported();
+            return;
+          }
+          let currentSession = null;
+
+          async function onClick() {
+            if (currentSession) {
+              await currentSession.end();
+              return;
+            }
+            try {
+              const session = await navigator.xr.requestSession('immersive-vr', {
+                optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking', 'layers']
+              });
+              currentSession = session;
+              renderer.xr.setSession(session);
+              button.textContent = 'Exit VR';
+              session.addEventListener('end', () => {
+                currentSession = null;
+                button.textContent = 'Enter VR';
+              });
+            } catch (e) {
+              console.error('No se pudo iniciar la sesión XR', e);
+            }
+          }
+
+          button.addEventListener('click', onClick);
+        }).catch((err) => {
+          console.warn('Error comprobando XR:', err);
+          showUnsupported();
+        });
+      } else {
+        showUnsupported();
+      }
+
+      return button;
+    }
+  };
+
+  // ============ VR CONTROLLERS & JOYSTICK INPUT ============
+  function setupVRControllers() {
+    if (!renderer || !renderer.xr) return;
+
+    controller1 = renderer.xr.getController(0);
+    controller2 = renderer.xr.getController(1);
+
+    const controllerGeom = new THREE.CapsuleGeometry(0.02, 0.08, 4, 8);
+    const controllerMat = new THREE.MeshStandardMaterial({
+      color: 0xffffff,
+      emissive: 0x22c55e,
+      emissiveIntensity: 0.4
+    });
+
+    const controllerMesh1 = new THREE.Mesh(controllerGeom, controllerMat);
+    controllerMesh1.position.set(0, 0, -0.05);
+    controller1.add(controllerMesh1);
+
+    const controllerMesh2 = new THREE.Mesh(controllerGeom, controllerMat.clone());
+    controllerMesh2.position.set(0, 0, -0.05);
+    controller2.add(controllerMesh2);
+
+    controller1.addEventListener('connected', function (event) {
+      if (event.data && event.data.gamepad) {
+        this.userData.gamepad = event.data.gamepad;
+        controllerGamepad1 = this.userData.gamepad;
+      }
+    });
+
+    controller1.addEventListener('disconnected', function () {
+      controllerGamepad1 = null;
+      delete this.userData.gamepad;
+    });
+
+    controller2.addEventListener('connected', function (event) {
+      if (event.data && event.data.gamepad) {
+        this.userData.gamepad = event.data.gamepad;
+        controllerGamepad2 = this.userData.gamepad;
+      }
+    });
+
+    controller2.addEventListener('disconnected', function () {
+      controllerGamepad2 = null;
+      delete this.userData.gamepad;
+    });
+
+    scene.add(controller1);
+    scene.add(controller2);
+  }
+
+  // Lee el joystick y lo traduce a W/A/S/D en rejilla
+  function processVRInput(dt) {
+    if (!renderer || !renderer.xr || !renderer.xr.isPresenting || !player) return;
+    const now = performance.now();
+    if (now - lastVRMoveTime < VR_MOVE_COOLDOWN) return;
+
+    let axisX = 0;
+    let axisY = 0;
+    const pads = [];
+
+    if (controllerGamepad1 && controllerGamepad1.axes) pads.push(controllerGamepad1);
+    if (controllerGamepad2 && controllerGamepad2.axes) pads.push(controllerGamepad2);
+
+    pads.forEach((pad) => {
+      if (!pad.axes || pad.axes.length < 2) return;
+      const x = pad.axes[0];
+      const y = pad.axes[1];
+      if (Math.abs(x) > Math.abs(axisX)) axisX = x;
+      if (Math.abs(y) > Math.abs(axisY)) axisY = y;
+    });
+
+    const threshold = 0.45;
+    let code = null;
+
+    if (axisY < -threshold) {
+      code = 'KeyW';
+    } else if (axisY > threshold) {
+      code = 'KeyS';
+    } else if (axisX < -threshold) {
+      code = 'KeyA';
+    } else if (axisX > threshold) {
+      code = 'KeyD';
+    }
+
+    if (code) {
+      handleMove(code);
+      lastVRMoveTime = now;
+    }
+  }
+
+  // Actualiza límites de navegación con base en segmentos activos
+  function updateNavigationBounds() {
+    if (!segments.length) return;
+    const first = segments[0];
+    const last = segments[segments.length - 1];
+    const maxLane = Math.floor(CONFIG.lanes / 2) * CONFIG.laneWidth;
+
+    navBounds.minX = -maxLane;
+    navBounds.maxX = maxLane;
+
+    navBounds.minZ = -last.z * CONFIG.tile - CONFIG.tile * 0.5;
+    navBounds.maxZ = -first.z * CONFIG.tile + CONFIG.tile * 0.5;
+  }
+
   // ============ INITIALIZATION ============
   init();
 
   function init() {
-    // Scene setup
+    // Scene setup (tema nocturno / survival)
     scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x87CEEB); // Fallback color
-    scene.fog = new THREE.Fog(0x87CEEB, 30, 80);
+    const nightColor = new THREE.Color(0x050816);
+    scene.background = nightColor.clone();
+    scene.fog = new THREE.Fog(nightColor.getHex(), 20, 70);
 
     clock = new THREE.Clock();
 
-    // Camera setup
+    // Camera + VR rig
     camera = new THREE.PerspectiveCamera(
       55, 
       window.innerWidth / window.innerHeight, 
       0.1, 
       500
     );
-    camera.position.set(0, 12, 16);
-    camera.lookAt(0, 0, 0);
 
-    // Renderer setup
+    vrRig = new THREE.Group();
+    vrRig.position.set(0, 0, 8);
+    camera.position.set(0, 1.6, 0); // altura de ojos
+    vrRig.add(camera);
+    scene.add(vrRig);
+
+    // Renderer + WebXR
     renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setSize(window.innerWidth, window.innerHeight);
     renderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.0;
+    renderer.toneMappingExposure = 0.6;
     renderer.outputEncoding = THREE.sRGBEncoding;
+    renderer.xr.enabled = true;
     document.body.appendChild(renderer.domElement);
 
-    // Lighting
-    const hemi = new THREE.HemisphereLight(0xffffff, 0x444444, 0.6);
+    const vrButton = VRButton.createButton(renderer);
+    document.body.appendChild(vrButton);
+
+    // Iluminación nocturna
+    const hemi = new THREE.HemisphereLight(0x555577, 0x050509, 0.8);
     scene.add(hemi);
     
-    const sun = new THREE.DirectionalLight(0xffffff, 1.2);
+    const sun = new THREE.DirectionalLight(0xfff1c1, 1.0);
     sun.position.set(10, 20, 5);
     sun.castShadow = true;
     sun.shadow.camera.left = -30;
@@ -411,46 +620,82 @@
     sun.shadow.mapSize.height = 2048;
     scene.add(sun);
 
-    // Materials with better PBR properties
+    // Texturas desde TEXTURAS/
+    const grassTex = textureLoader.load('TEXTURAS/grass.png');
+    grassTex.wrapS = grassTex.wrapT = THREE.RepeatWrapping;
+    grassTex.anisotropy = 4;
+
+    const roadTex = textureLoader.load('TEXTURAS/road.png');
+    roadTex.wrapS = roadTex.wrapT = THREE.RepeatWrapping;
+    roadTex.anisotropy = 4;
+
+    const woodTex = textureLoader.load('TEXTURAS/wood.png');
+    woodTex.wrapS = woodTex.wrapT = THREE.RepeatWrapping;
+    woodTex.anisotropy = 4;
+
+    const rockTex = textureLoader.load('TEXTURAS/rock.png');
+    rockTex.wrapS = rockTex.wrapT = THREE.RepeatWrapping;
+    rockTex.anisotropy = 4;
+
+    // Materials usando SOLO las texturas
     materials.grass = new THREE.MeshStandardMaterial({ 
-      color: 0x4ade80,
+      map: grassTex,
       roughness: 0.9,
-      metalness: 0.0,
-      envMapIntensity: 0.3
+      metalness: 0.0
     });
     
     materials.road = new THREE.MeshStandardMaterial({ 
-      color: 0x374151,
-      roughness: 0.8,
-      metalness: 0.1,
-      envMapIntensity: 0.2
+      map: roadTex,
+      roughness: 0.85,
+      metalness: 0.05
     });
     
     materials.roadLine = new THREE.MeshStandardMaterial({ 
       color: 0xfbbf24,
       emissive: 0xfbbf24,
-      emissiveIntensity: 0.2,
+      emissiveIntensity: 0.3,
       roughness: 0.7,
       metalness: 0.0
     });
     
     materials.log = new THREE.MeshStandardMaterial({ 
-      color: 0x92400e,
-      roughness: 0.9,
-      metalness: 0,
-      envMapIntensity: 0.2
+      map: woodTex,
+      roughness: 0.8,
+      metalness: 0.1
     });
     
     materials.rock = new THREE.MeshStandardMaterial({ 
-      color: 0x6b7280,
-      roughness: 1,
-      metalness: 0,
-      envMapIntensity: 0.3
+      map: rockTex,
+      roughness: 1.0,
+      metalness: 0
+    });
+
+    // Audio
+    audioListener = new THREE.AudioListener();
+    camera.add(audioListener);
+    audioLoader = new THREE.AudioLoader();
+    bgMusic = new THREE.Audio(audioListener);
+    collisionSound = new THREE.Audio(audioListener);
+
+    audioLoader.load('rgbe/song.wav', (buffer) => {
+      bgMusic.setBuffer(buffer);
+      bgMusic.setLoop(true);
+      bgMusic.setVolume(0.35);
+      if (gameStarted && !bgMusic.isPlaying) bgMusic.play();
+    });
+
+    audioLoader.load('rgbe/punch.wav', (buffer) => {
+      collisionSound.setBuffer(buffer);
+      collisionSound.setLoop(false);
+      collisionSound.setVolume(0.9);
     });
 
     // Ground container
     window.ground = new THREE.Group();
     scene.add(window.ground);
+
+    // VR controllers
+    setupVRControllers();
 
     // Load HDR environment and models
     loadHDREnvironment();
@@ -477,38 +722,30 @@
   function loadHDREnvironment() {
     const rgbeLoader = new THREE.RGBELoader();
     
-    // You can use any HDR file. Common free sources:
-    // - https://polyhaven.com/hdris
-    // - https://hdrihaven.com/
-    // Popular options: 'venice_sunset_1k.hdr', 'kloppenheim_06_1k.hdr', 'studio_small_03_1k.hdr'
-    
     rgbeLoader.load(
-      'rgbe/wide_street_4k.hdr', // Updated HDR file path
+      'rgbe/wide_street_4k.hdr',
       (texture) => {
         texture.mapping = THREE.EquirectangularReflectionMapping;
-        
-        // Set as scene background
-        scene.background = texture;
-        
-        // Set as environment map for realistic reflections
-        scene.environment = texture;
-        
-        // Update all materials to use the environment map
-        Object.values(materials).forEach(mat => {
-          if (mat.isMeshStandardMaterial || mat.isMeshPhysicalMaterial) {
-            mat.envMap = texture;
-            mat.needsUpdate = true;
-          }
-        });
-        
-        // Update fog color to match environment
+
         const pmremGenerator = new THREE.PMREMGenerator(renderer);
         pmremGenerator.compileEquirectangularShader();
         const envMap = pmremGenerator.fromEquirectangular(texture).texture;
         scene.environment = envMap;
         pmremGenerator.dispose();
-        
-        console.log('HDR environment loaded successfully');
+
+        const nightColor = new THREE.Color(0x050816);
+        scene.background = nightColor.clone();
+        scene.fog.color.copy(nightColor);
+        renderer.toneMappingExposure = 0.6;
+
+        Object.values(materials).forEach(mat => {
+          if (mat && (mat.isMeshStandardMaterial || mat.isMeshPhysicalMaterial)) {
+            mat.envMap = envMap;
+            mat.needsUpdate = true;
+          }
+        });
+
+        console.log('HDR environment loaded (night styling)');
         onModelLoaded();
       },
       (progress) => {
@@ -518,9 +755,10 @@
         }
       },
       (error) => {
-        console.warn('HDR environment not found, using fallback sky color');
-        // Keep the default blue sky
-        scene.background = new THREE.Color(0x87CEEB);
+        console.warn('HDR environment not found, using fallback dark sky');
+        const nightColor = new THREE.Color(0x050816);
+        scene.background = nightColor.clone();
+        scene.fog.color.copy(nightColor);
         onModelLoaded();
       }
     );
@@ -531,9 +769,8 @@
     const gltfLoader = new THREE.GLTFLoader();
     const fbxLoader = new THREE.FBXLoader();
 
-    // Load car models with specific configurations
     const carConfigs = [
-      { path: 'Models/car1.glb', scale: 1.2, rotation: Math.PI / 2 }, // Car1 rotated horizontally
+      { path: 'Models/car1.glb', scale: 1.2, rotation: Math.PI / 2 },
       { path: 'Models/car2.glb', scale: 1.0, rotation: 0 },
       { path: 'Models/coupe_car.glb', scale: 1.0, rotation: 0 }
     ];
@@ -544,27 +781,22 @@
         (gltf) => {
           const model = gltf.scene;
           
-          // Calculate bounding box to normalize size
           const box = new THREE.Box3().setFromObject(model);
           const size = box.getSize(new THREE.Vector3());
           const maxDim = Math.max(size.x, size.y, size.z);
-          const targetSize = 2.0; // Target size for all cars
+          const targetSize = 2.0;
           const normalizeScale = targetSize / maxDim;
           
-          // Apply normalized scale
           model.scale.set(normalizeScale, normalizeScale, normalizeScale);
           
-          // Apply rotation if needed
           if (config.rotation !== 0) {
             model.rotation.y = config.rotation;
           }
           
-          // Center the model
           box.setFromObject(model);
           const center = box.getCenter(new THREE.Vector3());
           model.position.set(-center.x, 0, -center.z);
           
-          // Create a wrapper group
           const wrapper = new THREE.Group();
           wrapper.add(model);
           
@@ -587,7 +819,6 @@
         },
         (error) => {
           console.error(`Error loading ${config.path}:`, error);
-          // Create fallback car
           const fallbackCar = createFallbackCar();
           carModels.push(fallbackCar);
           onModelLoaded();
@@ -595,7 +826,7 @@
       );
     });
 
-    // Load player model
+    // Player
     fbxLoader.load(
       'Models/Taunt.fbx',
       (fbx) => {
@@ -610,21 +841,15 @@
           }
         });
 
-        // Setup animation mixer
         mixer = new THREE.AnimationMixer(playerModel);
         
         console.log('Player model loaded successfully');
         
-        // Check if player model has built-in animations
         if (fbx.animations && fbx.animations.length > 0) {
-          console.log(`Found ${fbx.animations.length} built-in animations in player model`);
-          // Use first animation as idle if available
           animations.idle = mixer.clipAction(fbx.animations[0]);
           animations.idle.setLoop(THREE.LoopRepeat);
-          console.log('Using built-in animation as idle');
         }
         
-        // Try to load external idle/reposo animation
         fbxLoader.load('Models/reposo.fbx', (anim) => {
           if (anim.animations && anim.animations.length > 0) {
             animations.idle = mixer.clipAction(anim.animations[0]);
@@ -645,7 +870,6 @@
       },
       (error) => {
         console.error('Error loading player model:', error);
-        // Create fallback player
         const geometry = new THREE.BoxGeometry(1, 1.5, 0.8);
         const material = new THREE.MeshStandardMaterial({ color: 0x22c55e });
         playerModel = new THREE.Mesh(geometry, material);
@@ -654,6 +878,31 @@
         onModelLoaded();
       }
     );
+
+    // Carga props temáticos (opcional)
+    fbxLoader.load('Models/muerte.fbx', (spooky) => {
+      console.log('Loaded thematic model muerte.fbx');
+      (spooky.scene || spooky).traverse((child) => {
+        if (child.isMesh) {
+          child.castShadow = true;
+          child.receiveShadow = true;
+        }
+      });
+    }, undefined, () => {
+      console.warn('muerte.fbx not found, continuing without it');
+    });
+
+    fbxLoader.load('Models/wood box.fbx', (crate) => {
+      console.log('Loaded thematic model wood box.fbx');
+      (crate.scene || crate).traverse((child) => {
+        if (child.isMesh) {
+          child.castShadow = true;
+          child.receiveShadow = true;
+        }
+      });
+    }, undefined, () => {
+      console.warn('wood box.fbx not found, continuing without it');
+    });
   }
 
   function loadRunAnimation(fbxLoader) {
@@ -661,7 +910,6 @@
       if (anim.animations && anim.animations.length > 0) {
         animations.run = mixer.clipAction(anim.animations[0]);
         animations.run.setLoop(THREE.LoopRepeat);
-        console.log('Run animation loaded');
       }
       loadDeathAnimation(fbxLoader);
     }, undefined, (error) => {
@@ -676,12 +924,10 @@
         animations.death = mixer.clipAction(anim.animations[0]);
         animations.death.setLoop(THREE.LoopOnce);
         animations.death.clampWhenFinished = true;
-        console.log('Death animation loaded');
       }
       onModelLoaded();
     }, undefined, (error) => {
       console.warn('Death animation not found, continuing without it:', error);
-      // Continue even without death animation
       onModelLoaded();
     });
   }
@@ -728,24 +974,20 @@
   }
 
   function finishLoading() {
-    // Hide loading screen
     loadingText.style.display = 'none';
     
-    // Add player to scene
     if (playerModel) {
       player = new THREE.Group();
       player.add(playerModel);
       player.position.set(0, 0, 0);
       scene.add(player);
       
-      // Start with idle animation
       if (animations.idle) {
         currentAction = animations.idle;
         currentAction.play();
       }
     }
 
-    // Show start screen
     startScreen.style.display = 'grid';
     
     setTimeout(() => {
@@ -760,11 +1002,16 @@
     levelIndicator.style.display = 'block';
     gameStarted = true;
     
-    // Build initial segments
     for (let i = -CONFIG.segmentsBehind; i <= CONFIG.segmentsAhead; i++) {
       const seg = (i <= 2) ? addSafeSegment(i) : 
                    (Math.random() < 0.6 ? addRoadSegment(i) : addSafeSegment(i));
       segments.push(seg);
+    }
+
+    updateNavigationBounds();
+
+    if (bgMusic && bgMusic.buffer && !bgMusic.isPlaying) {
+      bgMusic.play();
     }
     
     animate();
@@ -783,7 +1030,6 @@
 
     const created = [plane];
     
-    // Add decorative rocks with collision
     if (Math.random() < 0.3) {
       for (let i = 0; i < 2; i++) {
         const r = new THREE.Mesh(
@@ -794,13 +1040,12 @@
         r.position.set(lane, 0.4, -zIndex * CONFIG.tile + (Math.random() - 0.5));
         r.castShadow = true;
         
-        // Add userData to identify as obstacle
         r.userData = {
           type: 'rock',
           isObstacle: true
         };
         
-        obstacles.push(r); // Add to obstacles array for collision detection
+        obstacles.push(r);
         window.ground.add(r);
         created.push(r);
       }
@@ -821,7 +1066,6 @@
 
     const created = [plane];
 
-    // Add road lines
     const lineGeo = new THREE.BoxGeometry(0.15, 0.05, CONFIG.tile * 0.4);
     for (let lane = -Math.floor(CONFIG.lanes / 2); lane < Math.floor(CONFIG.lanes / 2); lane++) {
       const line = new THREE.Mesh(lineGeo, materials.roadLine);
@@ -834,14 +1078,12 @@
       created.push(line);
     }
 
-    // Spawn car obstacles
     const direction = Math.random() < 0.5 ? 1 : -1;
     const lanesArray = [];
     for (let lane = -Math.floor(CONFIG.lanes / 2); lane <= Math.floor(CONFIG.lanes / 2); lane++) {
       lanesArray.push(lane);
     }
 
-    // Shuffle lanes to avoid clustering
     lanesArray.sort(() => Math.random() - 0.5);
 
     for (const lane of lanesArray) {
@@ -849,14 +1091,12 @@
         const carIndex = Math.floor(Math.random() * carModels.length);
         const carClone = carModels[carIndex].clone();
         
-        // Position the car
         carClone.position.set(
           lane * CONFIG.laneWidth,
           0,
           -zIndex * CONFIG.tile
         );
 
-        // Rotate car based on direction
         if (direction < 0) {
           carClone.rotation.y += Math.PI;
         }
@@ -874,7 +1114,7 @@
         obstacles.push(carClone);
         window.ground.add(carClone);
         created.push(carClone);
-        break; // Only one car per segment for better gameplay
+        break;
       }
     }
 
@@ -924,27 +1164,29 @@
 
     if (!moved) return;
 
-    // Keep within lane boundaries
     const maxLane = Math.floor(CONFIG.lanes / 2) * CONFIG.laneWidth;
     nx = Math.max(-maxLane, Math.min(maxLane, nx));
+
+    if (navBounds.minX !== null) {
+      nx = Math.max(navBounds.minX, Math.min(navBounds.maxX, nx));
+    }
+    if (navBounds.minZ !== null) {
+      nz = Math.max(navBounds.minZ, Math.min(navBounds.maxZ, nz));
+    }
 
     isMoving = true;
     moveStart = performance.now();
     moveFrom.copy(player.position);
     moveTo.set(nx, 0, nz);
 
-    // Play run animation when moving
     if (animations.run) {
       if (currentAction !== animations.run) {
-        if (currentAction) {
-          currentAction.fadeOut(0.2);
-        }
+        if (currentAction) currentAction.fadeOut(0.2);
         currentAction = animations.run;
         currentAction.reset().fadeIn(0.2).play();
       }
     }
 
-    // Rotate player
     const dir = new THREE.Vector3().subVectors(moveTo, moveFrom);
     if (dir.lengthSq() > 0) {
       const targetRot = Math.atan2(dir.x, dir.z);
@@ -955,18 +1197,18 @@
   }
 
   // ============ GAME LOOP ============
-  function animate() {
-    if (!gameStarted) return;
-    requestAnimationFrame(animate);
+  function gameLoop() {
+    if (!gameStarted) {
+      renderer.render(scene, camera);
+      return;
+    }
     
     const dt = clock.getDelta();
 
-    // Update animation mixer
     if (mixer) {
       mixer.update(dt);
     }
 
-    // Player movement interpolation
     if (isMoving && player) {
       const elapsed = performance.now() - moveStart;
       const duration = CONFIG.player.speed * 1000;
@@ -974,8 +1216,6 @@
       const ease = t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t;
 
       player.position.lerpVectors(moveFrom, moveTo, ease);
-      
-      // Slight bounce
       player.position.y = Math.sin(t * Math.PI) * 0.2;
 
       if (player.userData.rotAnim) {
@@ -987,25 +1227,20 @@
         isMoving = false;
         player.position.y = 0;
         
-        // Switch back to idle animation
         if (animations.idle) {
           if (currentAction !== animations.idle) {
-            if (currentAction) {
-              currentAction.fadeOut(0.3);
-            }
+            if (currentAction) currentAction.fadeOut(0.3);
             currentAction = animations.idle;
             currentAction.reset().fadeIn(0.3).play();
           }
         }
 
-        // Update distance and score when moving forward
         if (moveTo.z < moveFrom.z) {
           distance += 1;
           score += CONFIG.pointsPerMove;
           distUI.textContent = distance;
           scoreUI.textContent = score;
 
-          // Level up check
           if (distance > 0 && distance % CONFIG.levelThreshold === 0) {
             levelUp();
           }
@@ -1015,7 +1250,6 @@
       }
     }
 
-    // Move obstacles (cars)
     for (const o of obstacles) {
       if (!o.userData || o.userData.type !== 'car') continue;
       
@@ -1032,21 +1266,36 @@
       }
     }
 
-    // Collision detection
     checkCollisions();
 
-    // Camera follow
+    // VR input
+    processVRInput(dt);
+
     if (player) {
-      const targetCam = new THREE.Vector3(
-        player.position.x * 0.3, 
-        12, 
-        player.position.z + 16
-      );
-      camera.position.lerp(targetCam, 0.1);
-      camera.lookAt(player.position.x * 0.2, 0, player.position.z - 3);
+      if (renderer.xr && renderer.xr.isPresenting && vrRig) {
+        const targetRigPos = new THREE.Vector3(player.position.x, 0, player.position.z);
+        vrRig.position.lerp(targetRigPos, 0.15);
+      } else {
+        const targetCam = new THREE.Vector3(
+          player.position.x,
+          1.6,
+          player.position.z + 0.2
+        );
+        camera.position.lerp(targetCam, 0.1);
+        const lookAt = new THREE.Vector3(
+          player.position.x,
+          1.6,
+          player.position.z - 1.0
+        );
+        camera.lookAt(lookAt);
+      }
     }
 
     renderer.render(scene, camera);
+  }
+
+  function animate() {
+    renderer.setAnimationLoop(gameLoop);
   }
 
   // ============ COLLISION DETECTION ============
@@ -1058,10 +1307,8 @@
     for (const o of obstacles) {
       if (!o.parent || !o.userData) continue;
       
-      // Check collision with cars and rocks
       if (o.userData.type === 'car' || o.userData.isObstacle) {
         const obstacleBox = new THREE.Box3().setFromObject(o);
-        
         if (playerBox.intersectsBox(obstacleBox)) {
           onHit();
           break;
@@ -1081,7 +1328,11 @@
     lives--;
     livesUI.textContent = lives;
 
-    // Play death animation
+    if (collisionSound && collisionSound.buffer) {
+      if (collisionSound.isPlaying) collisionSound.stop();
+      collisionSound.play();
+    }
+
     if (animations.death && mixer) {
       if (currentAction) currentAction.fadeOut(0.1);
       currentAction = animations.death;
@@ -1099,7 +1350,6 @@
       }, 1000);
     }
 
-    // Visual feedback - flash red
     if (playerModel) {
       playerModel.traverse((child) => {
         if (child.isMesh && child.material) {
@@ -1123,7 +1373,6 @@
         endGame();
       }, 1500);
     } else {
-      // Move player back to safe position
       setTimeout(() => {
         player.position.set(0, 0, player.position.z + CONFIG.tile * 2);
         moveFrom.copy(player.position);
@@ -1139,10 +1388,8 @@
     levelUI.textContent = level;
     scoreUI.textContent = score;
     
-    // Increase difficulty
     difficultyMultiplier = 1 + (level - 1) * 0.15;
     
-    // Visual feedback for level up
     levelIndicator.style.transform = 'translateX(-50%) scale(1.3)';
     levelIndicator.style.background = 'linear-gradient(135deg, rgba(251, 191, 36, 0.8) 0%, rgba(245, 158, 11, 0.8) 100%)';
     
@@ -1165,7 +1412,6 @@
     
     const headZ = -Math.floor(player.position.z / CONFIG.tile);
     
-    // Add segments ahead
     while (segments.length === 0 || 
            segments[segments.length - 1].z < headZ + CONFIG.segmentsAhead) {
       const nextZ = segments.length ? segments[segments.length - 1].z + 1 : headZ;
@@ -1173,7 +1419,6 @@
       segments.push(seg);
     }
     
-    // Remove segments behind
     const minZ = headZ - CONFIG.segmentsBehind;
     while (segments.length && segments[0].z < minZ) {
       const s = segments.shift();
@@ -1192,8 +1437,8 @@
       }
     }
     
-    // Clean up obstacles that are no longer in scene
     obstacles = obstacles.filter(o => o.parent);
+    updateNavigationBounds();
   }
   </script>
 </body>
